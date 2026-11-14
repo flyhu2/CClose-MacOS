@@ -35,11 +35,11 @@ struct SettingsContent: View {
                     .resizable().frame(width: 30, height: 30)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("CClose-MscOS").font(.system(size: 14, weight: .semibold))
-                    Text("by flyhu2 · v\(Version.string)").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Text("by flyhu2 · v\(Version.string) (\(Version.build))").font(.system(size: 10)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button { model.run("togglePaused") } label: {
-                    Label(model.item("togglePaused")?.state == .on ? "暂停" : "运行",
+                    Label(model.item("togglePaused")?.state == .on ? "暂停" : (permissionsReady ? "运行" : "待授权"),
                           systemImage: model.item("togglePaused")?.state == .on ? "pause.fill" : "circle.fill")
                         .font(.system(size: 10, weight: .medium)).foregroundStyle(accent)
                         .padding(.horizontal, 9).padding(.vertical, 6)
@@ -86,6 +86,9 @@ struct SettingsContent: View {
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Color.primary.opacity(0.09), lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+    private var permissionsReady: Bool {
+        ["openAccessibilitySettings", "openInputMonitoringSettings", "openScreenRecordingSettings"].allSatisfy { model.item($0)?.state == .on }
     }
     private var basicContent: some View {
         VStack(spacing: 8) {
@@ -170,15 +173,18 @@ struct SettingsContent: View {
         }
     }
     private func permission(_ title: String, _ selector: String) -> some View {
-        let granted = model.item(selector)?.state == .on
+        let state = model.item(selector)?.state
+        let granted = state == .on
+        let pending = state == nil || state == .mixed
         return Button { model.run(selector) } label: {
             HStack(spacing: 4) {
-                Image(systemName: granted ? "checkmark.circle.fill" : "exclamationmark.circle")
+                Image(systemName: granted ? "checkmark.circle.fill" : (pending ? "ellipsis.circle" : "exclamationmark.circle"))
                     .foregroundStyle(granted ? accent : Color.orange)
                 Text(title)
             }.font(.system(size: 10)).frame(maxWidth: .infinity).padding(.vertical, 6)
                 .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 6))
-        }.buttonStyle(.plain)
+        }.buttonStyle(.plain).help(model.item(selector)?.title ?? "正在检查")
+            .accessibilityValue(model.item(selector)?.title ?? "正在检查")
     }
     private func setting(_ title: String, detail: String, selector: String) -> some View {
         let item = model.item(selector)

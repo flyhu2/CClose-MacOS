@@ -3,6 +3,7 @@ import CoreGraphics
 
 enum Version {
     static let string = "1.0.0"
+    static let build = "2"
 }
 
 // MARK: - 诊断
@@ -20,7 +21,7 @@ enum Diagnostics {
         var lines: [String] = []
 
         lines.append("== cclose-mac 诊断 ==")
-        lines.append("版本        : \(Version.string)")
+        lines.append("版本        : \(Version.string) (build \(Version.build))")
         lines.append("系统        : macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
         lines.append("架构        : \(architecture)")
         let launchedByLaunchServices = getppid() == 1

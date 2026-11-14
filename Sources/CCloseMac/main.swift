@@ -56,12 +56,26 @@ if arguments.contains("--version") {
     exit(0)
 }
 
-guard SingleInstance.acquire() else {
-    fputs("cclose-mac 已经有一个实例在运行，本次启动已取消。\n", stderr)
-    if let bundleId = Bundle.main.bundleIdentifier,
-       let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first {
-        running.activate(options: [.activateAllWindows])
+// A newly opened copy must not silently hand control to an older binary.
+// Ask existing instances to quit normally so their independent desktops are restored.
+var acquired = SingleInstance.acquire()
+if !acquired, let bundleID = Bundle.main.bundleIdentifier {
+    let old = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+    old.forEach { _ = $0.terminate() }
+    let deadline = Date().addingTimeInterval(12)
+    while !acquired && Date() < deadline && !old.isEmpty {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        acquired = SingleInstance.acquire()
     }
+}
+guard acquired else {
+    let alert = NSAlert()
+    alert.messageText = "旧实例尚未退出"
+    alert.informativeText = "请先在旧版菜单中退出，或完成独立桌面恢复，再打开新版。为避免丢失窗口恢复记录，本次没有强制结束旧进程。"
+    alert.addButton(withTitle: "好")
+    NSApplication.shared.activate(ignoringOtherApps: true)
+    alert.runModal()
     exit(0)
 }
 

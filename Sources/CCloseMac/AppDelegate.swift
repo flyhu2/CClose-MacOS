@@ -39,17 +39,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         wireEngine()
         HUD.shared.prepare()
 
-        let originalAccessibility = Permissions.hasAccessibility
-        let originalInputMonitoring = Permissions.hasInputMonitoring
-        if !originalAccessibility {
-            _ = Permissions.requestAccessibility()
-        }
-        if !originalInputMonitoring {
-            _ = Permissions.requestInputMonitoring()
-        }
-        if !Permissions.allRequiredGranted {
+        PermissionChecks.shared.refresh()
+        let firstLaunch = !UserDefaults.standard.bool(forKey: "permissionOnboardingV2")
+        UserDefaults.standard.set(true, forKey: "permissionOnboardingV2")
+        if firstLaunch || !Permissions.allRequiredGranted || !Permissions.hasScreenRecording {
             presentPermissionAlert(needsAccessibility: !Permissions.hasAccessibility,
-                                   needsInputMonitoring: !Permissions.hasInputMonitoring)
+                                   needsInputMonitoring: !Permissions.hasInputMonitoring,
+                                   needsScreenRecording: !Permissions.hasScreenRecording)
         }
 
         startEngine()
@@ -140,6 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func tick() {
+        PermissionChecks.shared.refresh()
         PinManager.shared.prune()
         if settingsPanel?.isVisible == true { settingsModel.refresh() }
         let permitted = Permissions.allRequiredGranted
@@ -316,13 +313,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
         PinManager.shared.prune()
 
-        add(menu, Permissions.hasAccessibility ? "辅助功能权限：已授权" : "辅助功能权限：未授权（点击去开启）",
-            #selector(openAccessibilitySettings), state: Permissions.hasAccessibility)
-        add(menu, Permissions.hasInputMonitoring ? "输入监控权限：已授权" : "输入监控权限：未授权（点击去开启）",
-            #selector(openInputMonitoringSettings), state: Permissions.hasInputMonitoring)
-
-        add(menu, Permissions.hasScreenRecording ? "屏幕录制：已授权" : "屏幕录制：未授权（仅悬浮需要）",
-            #selector(openScreenRecordingSettings), state: Permissions.hasScreenRecording)
+        let checks = PermissionChecks.shared
+        for (title, selector, status) in [
+            ("辅助功能", #selector(openAccessibilitySettings), checks.accessibility),
+            ("输入监控", #selector(openInputMonitoringSettings), checks.input),
+            ("屏幕录制", #selector(openScreenRecordingSettings), checks.screen)
+        ] {
+            let item = add(menu, "\(title)：\(status.text)", selector)
+            item.state = status.menuState
+        }
 
         let paused = Prefs.shared.paused
         add(menu, "暂停所有手势", #selector(togglePaused), state: paused)
@@ -386,14 +385,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: 菜单动作
 
     @objc private func openAccessibilitySettings() {
+        _ = Permissions.requestAccessibility()
         Permissions.openAccessibilitySettings()
     }
 
     @objc private func openInputMonitoringSettings() {
+        _ = Permissions.requestInputMonitoring()
         Permissions.openInputMonitoringSettings()
     }
 
     @objc private func openScreenRecordingSettings() {
+        if !Permissions.hasScreenRecording { _ = CGRequestScreenCaptureAccess() }
         Permissions.openScreenRecordingSettings()
     }
 
@@ -502,13 +504,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: 首次授权引导
 
-    private func presentPermissionAlert(needsAccessibility: Bool, needsInputMonitoring: Bool) {
+    private func presentPermissionAlert(needsAccessibility: Bool, needsInputMonitoring: Bool, needsScreenRecording: Bool) {
         guard !permissionAlertShown else { return }
         permissionAlertShown = true
 
         DispatchQueue.main.async {
             let alert = NSAlert()
-            alert.messageText = "还需要授予手势权限"
+            alert.messageText = "首次使用与权限检查"
             var missing: [String] = []
             if needsAccessibility {
                 missing.append("辅助功能：识别标题栏并最小化 / 关闭窗口")
@@ -516,12 +518,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if needsInputMonitoring {
                 missing.append("输入监控：接收鼠标和键盘手势")
             }
+            if needsScreenRecording { missing.append("屏幕录制：生成实时镜像，不保存或上传画面") }
+            if missing.isEmpty { missing.append("系统预检已有授权，面板将继续验证实际访问能力。") }
             alert.informativeText = """
             请在「系统设置 → 隐私与安全性」中允许 cclose-mac：
 
             \(missing.joined(separator: "\n"))
 
-            两项权限都授权后才能完整使用。修改输入监控权限后，如果菜单栏仍显示感叹号，请退出并重新打开 cclose-mac。
+            面板对勾表示已验证可用，感叹号表示未授权，省略号表示待检查或需重启。点击面板权限按钮可申请授权。更新前请退出旧版，授权后请重新打开本应用。
             """
             alert.addButton(withTitle: "打开系统设置")
             alert.addButton(withTitle: "稍后")
@@ -529,9 +533,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSApp.activate(ignoringOtherApps: true)
             if alert.runModal() == .alertFirstButtonReturn {
                 if needsAccessibility {
-                    Permissions.openAccessibilitySettings()
+                    self.openAccessibilitySettings()
                 } else if needsInputMonitoring {
-                    Permissions.openInputMonitoringSettings()
+                    self.openInputMonitoringSettings()
+                } else if needsScreenRecording {
+                    self.openScreenRecordingSettings()
                 }
             }
         }

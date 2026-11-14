@@ -106,17 +106,21 @@ final class DesktopDockUI {
     private func children(_ node: AXUIElement) -> [AXUIElement] {
         AXBridge.attribute(node, "AXChildren") as? [AXUIElement] ?? []
     }
-    private func dock() throws -> AXUIElement {
-        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else {
-            throw DesktopFailure("Dock 未运行，无法管理独立桌面")
+    // macOS 27 moved mc.display out of Dock's empty mc stub into WindowManager.
+    private func missionDisplays() throws -> [AXUIElement] {
+        guard Permissions.hasAccessibility else {
+            throw DesktopFailure("辅助功能尚未授权，请在设置中开启后重新启动工具")
         }
-        let element = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(element, 0.15)
-        return element
+        var result: [AXUIElement] = []
+        for bundle in ["com.apple.WindowManager", "com.apple.dock"] {
+            guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first else { continue }
+            let root = AXUIElementCreateApplication(app.processIdentifier)
+            AXUIElementSetMessagingTimeout(root, 0.3)
+            result += MissionControlTree.displays(root, identifier: { AXBridge.string($0, "AXIdentifier") }, children: children)
+        }
+        return result
     }
-    private func missionControl() throws -> AXUIElement? {
-        try children(dock()).first { AXBridge.string($0, "AXIdentifier") == "mc" }
-    }
+    private func missionControl() throws -> AXUIElement? { try missionDisplays().first }
     private func pause() async throws { try await Task.sleep(nanoseconds: 100_000_000) }
     private func open() async throws {
         if try missionControl() != nil {
@@ -125,14 +129,14 @@ final class DesktopDockUI {
         }
         let url = URL(fileURLWithPath: "/System/Applications/Mission Control.app")
         guard NSWorkspace.shared.open(url) else { throw DesktopFailure("无法打开 Mission Control") }
-        for _ in 0..<25 {
+        for _ in 0..<60 {
             try await pause()
             if try missionControl() != nil {
                 try await Task.sleep(nanoseconds: 350_000_000)
                 return
             }
         }
-        throw DesktopFailure("Mission Control 未响应；未继续操作")
+        throw DesktopFailure("未找到 Mission Control 桌面控件；请核对辅助功能权限或系统版本，未迁移窗口")
     }
     private func displayID(_ identifier: String) throws -> UInt32 {
         if identifier == "Main" { return CGMainDisplayID() }
@@ -146,8 +150,21 @@ final class DesktopDockUI {
     private func subgroup(_ name: String, display: String) async throws -> AXUIElement {
         let id = try displayID(display)
         for _ in 0..<20 {
-            if let mc = try missionControl(),
-               let screen = children(mc).first(where: { AXBridge.string($0, "AXIdentifier") == "mc.display" && (AXBridge.attribute($0, "AXDisplayID") as? NSNumber)?.uint32Value == id }),
+            let displays = try missionDisplays()
+            let screen: AXUIElement?
+            if let exact = displays.first(where: { (AXBridge.attribute($0, "AXDisplayID") as? NSNumber)?.uint32Value == id }) {
+                screen = exact
+            } else {
+                // Newer systems can omit AXDisplayID. Match full Quartz display bounds,
+                // never visibleFrame or a guessed screen index (multi-display safety).
+                let expected = CGDisplayBounds(id)
+                let matches = displays.filter { node in
+                    guard let frame = AXBridge.frame(of: node) else { return false }
+                    return MirrorGeometry.sameFrame(frame, expected, tolerance: 2)
+                }
+                screen = matches.count == 1 ? matches[0] : nil
+            }
+            if let screen,
                let group = children(screen).first(where: { AXBridge.string($0, "AXIdentifier") == "mc.spaces" }),
                let target = children(group).first(where: { AXBridge.string($0, "AXIdentifier") == name }) { return target }
             try await pause()
@@ -176,7 +193,7 @@ final class DesktopDockUI {
             guard NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Mission Control.app")) else {
                 throw DesktopFailure("无法收起 Mission Control")
             }
-            for _ in 0..<25 {
+            for _ in 0..<60 {
                 try await pause()
                 if try missionControl() == nil { return }
             }
@@ -185,7 +202,7 @@ final class DesktopDockUI {
         try await open()
         let button = try await desktopButton(id)
         guard AXUIElementPerformAction(button, kAXPressAction as CFString) == .success else { throw DesktopFailure("无法切换到目标桌面") }
-        for _ in 0..<25 {
+        for _ in 0..<60 {
             try await pause()
             if try bridge.snapshot().contains(where: { $0.id == id && $0.active }), try missionControl() == nil { return }
         }
@@ -196,7 +213,7 @@ final class DesktopDockUI {
         let before = try bridge.snapshot()
         let add = try await subgroup("mc.spaces.add", display: display)
         guard AXUIElementPerformAction(add, kAXPressAction as CFString) == .success else { throw DesktopFailure("无法创建独立桌面") }
-        for _ in 0..<25 {
+        for _ in 0..<60 {
             try await pause()
             let added = try bridge.snapshot().filter { $0.display == display && $0.type == 0 && !Set(before.map(\.id)).contains($0.id) }
             if added.count > 1 { throw DesktopFailure("同时出现多个新增桌面，无法确认归属；未迁移应用，请检查 Mission Control") }
@@ -219,7 +236,7 @@ final class DesktopDockUI {
             throw DesktopFailure("独立桌面出现其他窗口，已停止清理；移走这些窗口后可重试恢复")
         }
         guard AXUIElementPerformAction(button, "AXRemoveDesktop" as CFString) == .success else { throw DesktopFailure("独立桌面清理失败，可稍后重试恢复") }
-        for _ in 0..<25 {
+        for _ in 0..<60 {
             try await pause()
             if !(try bridge.snapshot().contains(where: { $0.id == owned })) {
                 try await go(to: origin)
@@ -227,5 +244,27 @@ final class DesktopDockUI {
             }
         }
         throw DesktopFailure("独立桌面仍存在，保留恢复记录")
+    }
+}
+
+/// Bounded traversal shared by the old Dock and new WindowManager layouts.
+enum MissionControlTree {
+    static func displays<Node>(_ root: Node, identifier: (Node) -> String?, children: (Node) -> [Node]) -> [Node] {
+        var pending: [(Node, Int)] = [(root, 0)]
+        var found: [Node] = []
+        var visited = 0
+        while !pending.isEmpty && visited < 80 {
+            let (node, depth) = pending.removeFirst(); visited += 1
+            let name = identifier(node)
+            if name == "mc.display" {
+                if children(node).contains(where: { identifier($0) == "mc.spaces" }) { found.append(node) }
+                continue
+            }
+            // Only traverse the root and known Mission Control containers.
+            if depth == 0 || (name == "mc" && depth < 3) {
+                pending += children(node).prefix(40).map { ($0, depth + 1) }
+            }
+        }
+        return found
     }
 }

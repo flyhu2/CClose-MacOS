@@ -13,6 +13,7 @@ APP_NAME="cclose-mac"
 DISPLAY_NAME="CClose-MscOS"
 BUNDLE_ID="local.jingzhe.cclose-mac"
 VERSION="1.0.0"
+BUILD="2"
 MODE="${1:-release}"
 case "$MODE" in debug|release) ;; *) echo "用法: make_app.sh [release|debug]"; exit 1 ;; esac
 
@@ -57,13 +58,13 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key>
     <string>${VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>${VERSION}</string>
+    <string>${BUILD}</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>
     <true/>
     <key>LSMultipleInstancesProhibited</key>
-    <true/>
+    <false/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
