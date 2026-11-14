@@ -6,7 +6,7 @@
 
 用鼠标手势管理窗口，让参考内容保持可见。实时镜像悬浮，无需关闭 SIP 或安装 yabai。
 
-[公开发布页](https://cclose-macos.velvetswan16.chatgpt.site) · [下载安装包](https://github.com/flyhu2/Cclose-MacOS/releases/latest) · [反馈问题](https://github.com/flyhu2/Cclose-MacOS/issues)
+[公开发布页](https://cclose-macos.velvetswan16.chatgpt.site) · [下载安装包](https://github.com/flyhu2/CClose-MacOS/releases/latest) · [反馈问题](https://github.com/flyhu2/CClose-MacOS/issues)
 
 ## 开始使用
 
