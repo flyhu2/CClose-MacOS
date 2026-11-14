@@ -55,4 +55,24 @@ final class MirrorPreviewTests: XCTestCase {
         XCTAssertTrue(view.accessibilityPerformPress())
         XCTAssertEqual(visits, 1)
     }
+    func testTitleTopEdgeKeepsHoldAndDoubleClick() {
+        _ = NSApplication.shared
+        let panel = NSPanel(contentRect: CGRect(x: 0, y: 0, width: 500, height: 300), styleMask: [.borderless], backing: .buffered, defer: false)
+        let view = MirrorView(frame: panel.contentView!.bounds)
+        panel.contentView = view; view.sourceSize = view.bounds.size
+        view.sourceTitleHit = { _ in true }
+        var dismissals = 0, zooms = 0
+        view.onDismiss = { dismissals += 1 }
+        view.onTitleDoubleClick = { _, _ in zooms += 1 }
+        let edge = CGPoint(x: 200, y: 296)
+        view.mouseDown(with: event(.leftMouseDown, at: edge))
+        XCTAssertTrue(view.hasActiveGesture)
+        view.mouseUp(with: event(.leftMouseUp, at: edge, time: 10 + Prefs.shared.holdSeconds + 0.1))
+        XCTAssertEqual(dismissals, 1)
+        XCTAssertFalse(view.hasActiveGesture)
+        view.mouseDown(with: event(.leftMouseDown, at: edge))
+        view.mouseUp(with: event(.leftMouseUp, at: edge, time: 10.1, clicks: 2))
+        XCTAssertEqual(zooms, 1)
+    }
+
 }

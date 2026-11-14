@@ -141,6 +141,9 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
     private var latestCaptureImage: (CGImage, CGRect?)?
     private var preparingIsolation = false
     private var titleCells: [CGRect] = []
+    private var titleHitCache: [String: (Bool, TimeInterval)] = [:]
+    private var lastNativeCheck: TimeInterval = 0
+    private var lastHoverRaise: TimeInterval = 0
     var sourceExists: Bool {
         if independent {
             return (try? DesktopBridge.shared.windows().contains { $0.id == source.windowID && $0.pid == pid }) ?? true
@@ -214,7 +217,13 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
                 let relative = CGPoint(x: target.x - self.sourceFrame.minX, y: target.y - self.sourceFrame.minY)
                 return self.titleCells.contains { $0.contains(relative) }
             }
-            return AXBridge.isSourceTitlePoint(target, window: self.window, app: app)
+            let key = "\(Int(target.x / 8)),\(Int(target.y / 6)),\(Int(self.sourceFrame.width))"
+            let now = ProcessInfo.processInfo.systemUptime
+            if let cached = self.titleHitCache[key], now - cached.1 < 0.5 { return cached.0 }
+            let hit = AXBridge.isSourceTitlePoint(target, window: self.window, app: app)
+            if self.titleHitCache.count > 128 { self.titleHitCache.removeAll() }
+            self.titleHitCache[key] = (hit, now)
+            return hit
         }
         picture.onTitleDoubleClick = { [weak self] event, point in self?.titleDoubleClick(event, point: point) }
         globalPointerMonitor = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { [weak self] _ in self?.updateNativeInput() }
@@ -530,43 +539,22 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func titleDoubleClick(_ event: NSEvent, point: CGPoint) {
-        guard !geometryBusy, pendingFrame == nil else { return }
         let action = (UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") ?? "Maximize").lowercased()
         if action == "none" { return }
         if action == "minimize" { minimizeSource(); return }
+        // Use the existing coalescing AX geometry queue in both modes. Synthetic
+        // double-clicks can be rejected on newer macOS, and delayed fallback races restore.
+        let target: CGRect
         if let restore = zoomRestoreFrame {
             zoomRestoreFrame = nil
-            scheduleGeometry(restore, final: true)
-            return
+            target = restore
+        } else {
+            guard let screen = panel.screen else { return }
+            zoomRestoreFrame = panel.frame
+            target = screen.visibleFrame
         }
-        zoomRestoreFrame = panel.frame
-        if independent {
-            if let screen = panel.screen { scheduleGeometry(screen.visibleFrame, final: true) }
-            return
-        }
-        // Let the source execute its native title-bar action (Fill or app-specific Zoom).
-        // Keep our own pre-zoom frame so the second double click can always restore it.
-        activateSourceForInput()
-        guard let original = event.cgEvent,
-              let target = MirrorGeometry.targetPoint(point, source: sourceFrame, bounds: picture.bounds) else { return }
-        for click in 1...2 {
-            guard let down = MirrorEventRouter.addressedCopy(original, point: target, windowID: source.windowID, pid: pid), let up = down.copy() else { continue }
-            down.type = .leftMouseDown; up.type = .leftMouseUp
-            down.setDoubleValueField(.mouseEventPressure, value: 1)
-            up.setDoubleValueField(.mouseEventPressure, value: 0)
-            down.setIntegerValueField(.mouseEventClickState, value: Int64(click))
-            up.setIntegerValueField(.mouseEventClickState, value: Int64(click))
-            down.postToPid(pid); up.postToPid(pid)
-        }
-        let before = sourceFrame
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self, !self.stopped, self.zoomRestoreFrame != nil else { return }
-            if let actual = AXBridge.frame(of: self.window), !MirrorGeometry.sameFrame(actual, before) {
-                self.refreshSource()
-            } else if let screen = self.panel.screen {
-                self.scheduleGeometry(screen.visibleFrame, final: true)
-            }
-        }
+        titleHitCache.removeAll()
+        scheduleGeometry(target, final: true)
     }
 
     // With identical screen geometry, native delivery preserves menus, scrolling and IME.
@@ -589,9 +577,10 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
         let p = NSEvent.mouseLocation
         let point = CGPoint(x: p.x, y: (NSScreen.screens.first?.frame.maxY ?? 0) - p.y)
         guard let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
+        let transparentTools = Set(NSApp.windows.filter { $0.windowNumber > 0 && ($0 === panel || $0.ignoresMouseEvents) }.map { UInt32($0.windowNumber) })
         for entry in entries {
             guard let number = entry[kCGWindowNumber as String] as? UInt32,
-                  number != UInt32(panel.windowNumber),
+                  !transparentTools.contains(number),
                   let bounds = entry[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: bounds), frame.contains(point),
                   (entry[kCGWindowAlpha as String] as? Double ?? 1) > 0 else { continue }
@@ -601,13 +590,39 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func updateNativeInput() {
-        guard panel.ignoresMouseEvents else { return }
-        if NSEvent.pressedMouseButtons != 0 { return } // Preserve the complete native drag.
-        nativeButtons.removeAll()
-        let local = panel.convertPoint(fromScreen: NSEvent.mouseLocation)
-        if stopped || suspended || !picture.isContent(local) || !targetIsBelowMirror() {
+        guard !independent, !preparingIsolation else {
             panel.ignoresMouseEvents = false
+            return
         }
+        guard !picture.hasActiveGesture, NSEvent.pressedMouseButtons == 0 else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastNativeCheck >= 1.0 / 30 else { return }
+        lastNativeCheck = now
+        let local = panel.convertPoint(fromScreen: NSEvent.mouseLocation)
+        guard !stopped, !suspended, receivedFrame, panel.isVisible,
+              !geometryBusy, pendingFrame == nil, picture.isContent(local) else {
+            panel.ignoresMouseEvents = false
+            return
+        }
+        nativeButtons.removeAll()
+        // Prepare native delivery BEFORE mouse-down/scroll. Changing the recipient
+        // after receiving the first event requires postToPid, which may be dropped.
+        let expected = MirrorGeometry.screenFrame(panel.frame, desktopTop: NSScreen.screens.first?.frame.maxY ?? 0)
+        guard MirrorGeometry.sameFrame(sourceFrame, expected) else {
+            panel.ignoresMouseEvents = false
+            return
+        }
+        if !targetIsBelowMirror() {
+            panel.ignoresMouseEvents = false
+            // Raise only underneath the mirror; do not activate or steal keyboard focus
+            // on hover. Physical mouse-down performs normal macOS activation.
+            if !returningToSource, now - lastHoverRaise >= 0.25 {
+                lastHoverRaise = now
+                _ = AXBridge.raise(window)
+            }
+            return
+        }
+        panel.ignoresMouseEvents = true
     }
 
     private func finishNativeInput() {

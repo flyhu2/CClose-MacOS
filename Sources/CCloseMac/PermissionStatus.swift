@@ -28,15 +28,18 @@ final class PermissionChecks {
     private(set) var screen: PermissionStatus = .checking
     private var lastCheck = Date.distantPast
     private var checking = false
+    private var lastPreflights: [Bool] = []
     func refresh() {
         dispatchPrecondition(condition: .onQueue(.main))
         guard !checking else { return }
         let ax = Permissions.hasAccessibility, listen = Permissions.hasInputMonitoring, capture = Permissions.hasScreenRecording
+        let preflights = [ax, listen, capture]
+        if preflights == lastPreflights && accessibility == .ready && input == .ready && screen == .ready { return }
         if !ax { accessibility = .denied }
         if !listen { input = .denied }
         if !capture { screen = .denied }
         guard Date().timeIntervalSince(lastCheck) >= 8 else { return }
-        lastCheck = Date(); checking = true
+        lastCheck = Date(); checking = true; lastPreflights = preflights
         accessibility = PermissionStatus.resolve(preflight: ax, usable: ax ? Self.canReadSystemUI() : false)
         input = PermissionStatus.resolve(preflight: listen, usable: listen ? Self.canListen() : false)
         screen = capture ? .checking : .denied

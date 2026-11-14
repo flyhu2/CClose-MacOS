@@ -9,6 +9,7 @@ final class MirrorView: NSView {
     var sourceTitleHit: ((CGPoint) -> Bool)?
     var onManipulationStart: (() -> Void)?
     var onTitleDoubleClick: ((NSEvent, CGPoint) -> Void)?
+    var hasActiveGesture: Bool { mode != 0 }
     var isManipulating: Bool { (mode == 1 || mode == 2 || mode == 4) && moved }
     var onFrameChange: ((CGRect, Bool) -> Void)?
     var onInput: ((NSEvent, CGPoint) -> Void)?
@@ -30,6 +31,7 @@ final class MirrorView: NSView {
     private var mode = 0 // 1: title drag/hold, 2: resize, 3: command click
     private var resizeEdges = 0
     private var moved = false
+    private var titleGesture = false
     private var middleHandled = false
     private var holdWork: DispatchWorkItem?
     private let decoration = MirrorDecoration()
@@ -158,16 +160,17 @@ final class MirrorView: NSView {
         let point = local(event)
         resizeEdges = edges(point)
         let blank = !MirrorGeometry.imageRect(source: sourceSize, bounds: bounds).contains(point)
-        mode = resizeEdges != 0 ? 2 : (blank ? 4 : (isTitle(point) ? 1 : (contentInteractionEnabled && event.modifierFlags.contains(.command) ? 3 : 0)))
+        titleGesture = isTitle(point)
+        mode = resizeEdges != 0 ? 2 : (blank ? 4 : (titleGesture ? 1 : (contentInteractionEnabled && event.modifierFlags.contains(.command) ? 3 : 0)))
         guard mode != 0 else { input(event); return }
         downAt = NSEvent.mouseLocation
         initialFrame = window?.frame ?? .zero
         requestedResize = nil
         downTime = event.timestamp
         moved = false
-        if mode == 1 {
+        if titleGesture {
             let work = DispatchWorkItem { [weak self] in
-                guard let self, !self.moved, self.mode == 1 else { return }
+                guard let self, !self.moved, self.titleGesture, self.mode != 0 else { return }
                 HUD.shared.flash("松开以取消悬浮")
             }
             holdWork = work
@@ -178,7 +181,7 @@ final class MirrorView: NSView {
         guard mode != 0 else { input(event); return }
         guard let downAt, let window else { return }
         let delta = CGPoint(x: NSEvent.mouseLocation.x - downAt.x, y: NSEvent.mouseLocation.y - downAt.y)
-        if !moved && ((mode == 2 && hypot(delta.x, delta.y) > 1) || hypot(delta.x, delta.y) > 8) {
+        if !moved && ((mode == 2 && !titleGesture && hypot(delta.x, delta.y) > 1) || hypot(delta.x, delta.y) > (Prefs.shared.trackpadCompatibility ? 12 : 8)) {
             moved = true; holdWork?.cancel()
             if mode == 1 || mode == 2 || mode == 4 { onManipulationStart?() }
         }
@@ -199,9 +202,10 @@ final class MirrorView: NSView {
         mode = 0; downAt = nil
         if (oldMode == 2 || oldMode == 1 || oldMode == 4) && moved, let window { onFrameChange?(oldMode == 2 ? (requestedResize ?? window.frame) : window.frame, true) }
         if oldMode == 0 { input(event) }
-        else if oldMode == 1 && !moved && event.timestamp - downTime >= Prefs.shared.holdSeconds { onDismiss?() }
-        else if oldMode == 1 && !moved && event.clickCount == 2 { onTitleDoubleClick?(event, local(event)) }
+        else if titleGesture && !moved && event.timestamp - downTime >= Prefs.shared.holdSeconds { onDismiss?() }
+        else if titleGesture && !moved && event.clickCount == 2 { onTitleDoubleClick?(event, local(event)) }
         else if oldMode == 3 && !moved { onVisit?() }
+        titleGesture = false
     }
     override func rightMouseDown(with event: NSEvent) {
         if isTitle(local(event)), !Prefs.shared.paused, Prefs.shared.rightClickMinimize { onMinimize?() }

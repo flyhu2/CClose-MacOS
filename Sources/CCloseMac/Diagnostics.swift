@@ -2,8 +2,8 @@ import AppKit
 import CoreGraphics
 
 enum Version {
-    static let string = "1.0.0"
-    static let build = "2"
+    static let string = "1.0.1"
+    static let build = "3"
 }
 
 // MARK: - 诊断

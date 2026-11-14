@@ -51,8 +51,21 @@ enum AXBridge {
     static func isSourceTitlePoint(_ point: CGPoint, window: AXUIElement, app: AXUIElement) -> Bool {
         var result: AXUIElement?
         guard AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &result) == .success,
-              let hit = result, let owner = containingWindow(of: hit), CFEqual(owner, window) else { return false }
-        return !hasInteractiveTitleRole(titleAncestorRoles(hit))
+              var node = result else { return false }
+        // Read role + parent in one IPC and walk only once. The previous implementation
+        // walked the same ancestors twice on every cursor update.
+        for _ in 0..<12 {
+            var raw: CFArray?
+            guard AXUIElementCopyMultipleAttributeValues(node, ["AXRole", "AXParent"] as CFArray,
+                    AXCopyMultipleAttributeOptions(rawValue: 0), &raw) == .success,
+                  let values = raw as? [Any], values.count == 2, let role = values[0] as? String else { return false }
+            if role == "AXWindow" { return CFEqual(node, window) }
+            if interactiveTitleRoles.contains(role) { return false }
+            let parent = values[1] as CFTypeRef
+            guard CFGetTypeID(parent) == AXUIElementGetTypeID() else { return false }
+            node = unsafeBitCast(parent, to: AXUIElement.self)
+        }
+        return false
     }
 
     /// Read back the accepted frame: applications may impose their own minimum size.

@@ -35,7 +35,7 @@ struct SettingsContent: View {
                     .resizable().frame(width: 30, height: 30)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("CClose-MscOS").font(.system(size: 14, weight: .semibold))
-                    Text("by flyhu2 · v\(Version.string) (\(Version.build))").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Text("by flyhu2 · v\(Version.string)").font(.system(size: 10)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button { model.run("togglePaused") } label: {

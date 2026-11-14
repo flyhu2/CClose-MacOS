@@ -197,7 +197,7 @@ final class GestureEngine {
         if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
             let screenTop = NSScreen.screens.first?.frame.maxY ?? 0
             let point = NSPoint(x: event.location.x, y: screenTop - event.location.y)
-            if NSApp.windows.contains(where: { $0.isVisible && $0.frame.contains(point) && ($0 is MirrorPanel || $0.level == .popUpMenu) }) {
+            if NSApp.windows.contains(where: { $0.isVisible && $0.frame.contains(point) && (($0 is MirrorPanel && !$0.ignoresMouseEvents) || $0.level == .popUpMenu) }) {
                 return Unmanaged.passUnretained(event)
             }
         }
