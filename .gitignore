@@ -1,0 +1,10 @@
+.build/
+dist/
+.preview/
+.DS_Store
+
+# Private planning and local release notes
+LOCAL_RELEASE_TODO.md
+
+# Superseded local design notes
+.local-history/
