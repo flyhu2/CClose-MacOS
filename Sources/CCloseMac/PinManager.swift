@@ -129,6 +129,10 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
     private var stopped = false
     private var receivedFrame = false
+    private var nativePresentation = false
+    private var recoveryWork: DispatchWorkItem?
+    private var recoveryAttempts = 0
+    private var lifecycle = MirrorLifecycle()
     private var independent = false
     private var independentPresentationFrame: CGRect?
     private var lastPresentedSourceFrame: CGRect = .zero
@@ -145,10 +149,15 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
     private var lastNativeCheck: TimeInterval = 0
     private var lastHoverRaise: TimeInterval = 0
     var sourceExists: Bool {
-        if independent {
-            return (try? DesktopBridge.shared.windows().contains { $0.id == source.windowID && $0.pid == pid }) ?? true
-        }
-        return AXBridge.isAlive(window)
+        guard NSRunningApplication(processIdentifier: pid)?.isTerminated == false else { return false }
+        // AX cannotComplete is a timeout, not evidence that a window was closed.
+        var value: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(window, "AXRole" as CFString, &value)
+        let listed = result == .invalidUIElement
+            ? (CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]])?
+                .contains { ($0[kCGWindowNumber as String] as? UInt32) == source.windowID }
+            : nil
+        return lifecycle.sourceExists(processRunning: true, axResult: result, listed: listed)
     }
     private var suspended = false
     private var returningToSource = false
@@ -297,7 +306,7 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
         if stopped { try? await capture.stopCapture(); return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
             guard let self, !self.stopped, !self.receivedFrame else { return }
-            self.onFailure?("没有收到窗口画面，请检查权限后重试")
+            self.scheduleCaptureRecovery()
         }
     }
 
@@ -319,6 +328,7 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
     func stop() {
         resizePresentationID = UUID()
         resizeFeedback.hide()
+        recoveryWork?.cancel(); recoveryWork = nil
         finishNativeInput()
         releaseButtons()
         geometryWork?.cancel()
@@ -421,7 +431,7 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self, !self.stopped, self.resizePresentationID == id,
                   self.presentationSuppressed, !self.picture.isManipulating else { return }
             // Keep the usable real window rather than showing a stretched/stale mirror.
-            self.onFailure?("窗口画面未及时更新，已返回原窗口")
+            self.scheduleCaptureRecovery()
         }
     }
 
@@ -432,7 +442,7 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
         presentationSuppressed = false
         self.expectedPresentationPixels = nil
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        picture.layer?.opacity = 1
+        picture.layer?.opacity = nativePresentation ? 0 : 1
         CATransaction.commit()
         panel.hasShadow = true
     }
@@ -559,7 +569,7 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
 
     // With identical screen geometry, native delivery preserves menus, scrolling and IME.
     // Enable click-through only after checking the actual window directly under the mirror.
-    private func beginNativeInput() -> Bool {
+    private func beginNativeInput(at point: CGPoint) -> Bool {
         guard !independent, !preparingIsolation else { return false }
         guard !stopped, !suspended, !geometryBusy, pendingFrame == nil else { return false }
         activateSourceForInput()
@@ -567,15 +577,15 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
         let top = NSScreen.screens.first?.frame.maxY ?? 0
         guard let actual = AXBridge.frame(of: window),
               MirrorGeometry.sameFrame(actual, MirrorGeometry.screenFrame(panel.frame, desktopTop: top)),
-              targetIsBelowMirror() else { return false }
+              targetIsBelowMirror(at: point) else { return false }
         sourceFrame = actual
-        panel.ignoresMouseEvents = true
+        setNativePresentation(true)
         return true
     }
 
-    private func targetIsBelowMirror() -> Bool {
+    private func targetIsBelowMirror(at suppliedPoint: CGPoint? = nil) -> Bool {
         let p = NSEvent.mouseLocation
-        let point = CGPoint(x: p.x, y: (NSScreen.screens.first?.frame.maxY ?? 0) - p.y)
+        let point = suppliedPoint ?? CGPoint(x: p.x, y: (NSScreen.screens.first?.frame.maxY ?? 0) - p.y)
         guard let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
         let transparentTools = Set(NSApp.windows.filter { $0.windowNumber > 0 && ($0 === panel || $0.ignoresMouseEvents) }.map { UInt32($0.windowNumber) })
         for entry in entries {
@@ -591,7 +601,7 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func updateNativeInput() {
         guard !independent, !preparingIsolation else {
-            panel.ignoresMouseEvents = false
+            setNativePresentation(false)
             return
         }
         guard !picture.hasActiveGesture, NSEvent.pressedMouseButtons == 0 else { return }
@@ -601,7 +611,7 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
         let local = panel.convertPoint(fromScreen: NSEvent.mouseLocation)
         guard !stopped, !suspended, receivedFrame, panel.isVisible,
               !geometryBusy, pendingFrame == nil, picture.isContent(local) else {
-            panel.ignoresMouseEvents = false
+            setNativePresentation(false)
             return
         }
         nativeButtons.removeAll()
@@ -609,11 +619,11 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
         // after receiving the first event requires postToPid, which may be dropped.
         let expected = MirrorGeometry.screenFrame(panel.frame, desktopTop: NSScreen.screens.first?.frame.maxY ?? 0)
         guard MirrorGeometry.sameFrame(sourceFrame, expected) else {
-            panel.ignoresMouseEvents = false
+            setNativePresentation(false)
             return
         }
         if !targetIsBelowMirror() {
-            panel.ignoresMouseEvents = false
+            setNativePresentation(false)
             // Raise only underneath the mirror; do not activate or steal keyboard focus
             // on hover. Physical mouse-down performs normal macOS activation.
             if !returningToSource, now - lastHoverRaise >= 0.25 {
@@ -622,7 +632,18 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             return
         }
-        panel.ignoresMouseEvents = true
+        setNativePresentation(true)
+    }
+
+    private func setNativePresentation(_ enabled: Bool) {
+        panel.ignoresMouseEvents = enabled
+        guard nativePresentation != enabled else { return }
+        nativePresentation = enabled
+        // A stale capture must never cover the result of native input or an app menu.
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        picture.layer?.opacity = enabled || presentationSuppressed ? 0 : 1
+        CATransaction.commit()
+        panel.hasShadow = !enabled && !presentationSuppressed
     }
 
     private func finishNativeInput() {
@@ -630,21 +651,13 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let up = down.copy() else { continue }
             up.type = button == 0 ? .leftMouseUp : (button == 1 ? .rightMouseUp : .otherMouseUp)
             up.setDoubleValueField(.mouseEventPressure, value: 0)
-            up.postToPid(pid)
+            MirrorEventRouter.postNative(up)
         }
         nativeButtons.removeAll()
-        panel.ignoresMouseEvents = false
+        setNativePresentation(false)
     }
 
     private func minimizeSource() {
-        if independent {
-            onDismiss?()
-            Task { @MainActor [window] in
-                await DesktopMode.shared.waitForCleanup()
-                if !DesktopMode.shared.needsRecovery { _ = AXBridge.minimize(window) }
-            }
-            return
-        }
         finishNativeInput()
         releaseButtons()
         guard AXBridge.minimize(window) else { HUD.shared.flash("原窗口无法最小化"); return }
@@ -697,6 +710,20 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             if externallyResized { finishGeometryPresentation(for: currentFrame) }
         }
+        let minimized = AXBridge.bool(window, "AXMinimized")
+        if minimized == true {
+            waitingForSourceRestore = true
+            finishNativeInput(); releaseButtons()
+            suspended = true; returningToSource = false
+            panel.orderOut(nil)
+            return
+        }
+        if waitingForSourceRestore && !MirrorLifecycle.shouldResume(waiting: true, minimized: minimized) { return }
+        if waitingForSourceRestore {
+            recoveryAttempts = 0
+            resume()
+            if stream == nil { scheduleCaptureRecovery() }
+        }
         if independent {
             if DesktopMode.shared.isOnOwnedDesktop() {
                 suspended = true; returningToSource = true; panel.orderOut(nil)
@@ -704,15 +731,6 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
                 suspended = false; returningToSource = false
                 if receivedFrame { panel.orderFrontRegardless() }
             }
-        } else if AXBridge.bool(window, "AXMinimized") == true {
-            waitingForSourceRestore = true
-            finishNativeInput()
-            releaseButtons()
-            suspended = true
-            returningToSource = false
-            panel.orderOut(nil)
-        } else if waitingForSourceRestore {
-            resume()
         } else if returningToSource, let front = NSWorkspace.shared.frontmostApplication,
                   front.processIdentifier != pid, front.processIdentifier != ProcessInfo.processInfo.processIdentifier {
             resume()
@@ -723,6 +741,11 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
         releaseButtons()
         resizePending = true
         let newSize = frame.size
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self, weak capture] in
+            guard let self, let capture, !self.stopped, self.stream === capture,
+                  self.resizePending else { return }
+            self.scheduleCaptureRecovery()
+        }
         Task { @MainActor [weak self] in
             guard let self, !self.stopped else { return }
             let config = self.configuration(size: newSize)
@@ -734,8 +757,9 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
                 if !self.independent { self.picture.sourceSize = self.sourceFrame.size }
             } catch {
                 guard !self.stopped, self.stream === capture else { return }
-                if self.independent { HUD.shared.flash("正在恢复缩放画面…") }
-                else { self.onFailure?("窗口尺寸更新失败：\(error.localizedDescription)") }
+                self.scheduleCaptureRecovery()
+                self.resizePending = false
+                return
             }
             self.resizePending = false
             self.retryCapturePresentation()
@@ -756,9 +780,9 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
         activateSourceForInput()
         up.type = .rightMouseUp
         up.setDoubleValueField(.mouseEventPressure, value: 0)
-        if beginNativeInput() {
+        if beginNativeInput(at: target) {
             nativeButtons[1] = down
-            down.postToPid(pid) // Physical mouse-up goes to the real window.
+            MirrorEventRouter.postNative(down) // Physical mouse-up goes to the real window.
         } else {
             down.postToPid(pid)
             up.postToPid(pid)
@@ -804,12 +828,12 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
         // AppKit may retain the initial overlay as the drag/up recipient even after click-through.
         if nativeButtons[button] != nil && (isDrag || isUp) {
             if isUp { nativeButtons.removeValue(forKey: button) }
-            packet.postToPid(pid)
+            MirrorEventRouter.postNative(packet)
             return
         }
-        if (isDown || event.type == .scrollWheel), pressed.isEmpty, beginNativeInput() {
+        if (isDown || event.type == .scrollWheel), pressed.isEmpty, beginNativeInput(at: target) {
             if isDown { nativeButtons[button] = packet }
-            packet.postToPid(pid)
+            MirrorEventRouter.postNative(packet)
             return
         }
         if isDown { pressed[button] = packet }
@@ -819,10 +843,53 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
         packet.postToPid(pid)
     }
 
+    private func scheduleCaptureRecovery() {
+        guard !stopped, recoveryWork == nil, recoveryAttempts < 3 else { return }
+        recoveryAttempts += 1
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.recoveryWork = nil
+            guard !self.waitingForSourceRestore else { self.recoveryAttempts = 0; return }
+            Task { @MainActor [weak self] in
+                guard let self, !self.stopped else { return }
+                guard !self.captureRecoveryInFlight else { self.scheduleCaptureRecovery(); return }
+                self.captureRecoveryInFlight = true
+                let old = self.stream
+                self.stream = nil
+                // Do not wait for a failed stream's stop callback before starting its replacement.
+                old?.stopCapture { _ in }
+                let replacement = SCStream(filter: SCContentFilter(desktopIndependentWindow: self.source),
+                    configuration: self.configuration(size: self.sourceFrame.size), delegate: self)
+                self.stream = replacement
+                do {
+                    try replacement.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.queue)
+                    try await replacement.startCapture()
+                    guard !self.stopped else { replacement.stopCapture { _ in }; return }
+                    guard self.stream === replacement else { self.captureRecoveryInFlight = false; return }
+                    self.sourceSize = self.sourceFrame.size
+                    self.resizePending = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self, weak replacement] in
+                        guard let self, let replacement, !self.stopped,
+                              self.stream === replacement, self.recoveryAttempts > 0 else { return }
+                        self.scheduleCaptureRecovery()
+                    }
+                } catch {
+                    if self.stream === replacement { self.stream = nil }
+                    self.scheduleCaptureRecovery()
+                }
+                self.captureRecoveryInFlight = false
+            }
+        }
+        recoveryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double(recoveryAttempts), execute: work)
+        if recoveryAttempts == 1 { HUD.shared.flash("画面暂未更新，正在重试 · 已保留置顶") }
+    }
+
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.stopped, self.stream === stream else { return }
-            self.onFailure?("实时悬浮已停止：\(error.localizedDescription)")
+            self.stream = nil
+            self.scheduleCaptureRecovery()
         }
     }
 
@@ -870,6 +937,8 @@ private final class MirrorSession: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             self.picture.sourceSize = self.sourceFrame.size
         }
+        recoveryAttempts = 0
+        recoveryWork?.cancel(); recoveryWork = nil
         self.picture.layer?.contents = image
         lastPresentedSourceFrame = sourceFrame
         resizeFeedback.hide()

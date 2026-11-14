@@ -3,6 +3,35 @@ import CoreGraphics
 @testable import CCloseMac
 
 final class MirrorInteractionTests: XCTestCase {
+    func testNativeReplayRemovesOverlayRoutingButPreservesScroll() throws {
+        let original = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: 15, wheel2: -4, wheel3: 0))
+        original.flags = [.maskShift]
+        original.setIntegerValueField(.eventTargetUnixProcessID, value: 123)
+        original.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: 456)
+        let replay = try XCTUnwrap(MirrorEventRouter.nativeCopy(original))
+        XCTAssertEqual(replay.getIntegerValueField(.eventTargetUnixProcessID), 0)
+        XCTAssertEqual(replay.getIntegerValueField(.mouseEventWindowUnderMousePointer), 0)
+        XCTAssertEqual(replay.getIntegerValueField(.eventSourceUserData), MirrorEventRouter.marker)
+        XCTAssertEqual(replay.getIntegerValueField(.scrollWheelEventDeltaAxis1), original.getIntegerValueField(.scrollWheelEventDeltaAxis1))
+        XCTAssertEqual(replay.flags, original.flags)
+        XCTAssertEqual(original.getIntegerValueField(.eventTargetUnixProcessID), 123)
+    }
+    func testTimeoutAndMinimizedWindowDoNotEndSession() {
+        var state = MirrorLifecycle()
+        for _ in 0..<20 { XCTAssertTrue(state.sourceExists(processRunning: true, axResult: .cannotComplete, listed: false)) }
+        XCTAssertTrue(state.sourceExists(processRunning: true, axResult: .invalidUIElement, listed: true))
+        XCTAssertTrue(state.sourceExists(processRunning: true, axResult: .invalidUIElement, listed: nil))
+        XCTAssertTrue(state.sourceExists(processRunning: true, axResult: .invalidUIElement, listed: false))
+        XCTAssertTrue(state.sourceExists(processRunning: true, axResult: .invalidUIElement, listed: false))
+        XCTAssertFalse(state.sourceExists(processRunning: true, axResult: .invalidUIElement, listed: false))
+    }
+    func testRestoreRequiresConfirmedUnminimizedState() {
+        XCTAssertFalse(MirrorLifecycle.shouldResume(waiting: true, minimized: nil))
+        XCTAssertFalse(MirrorLifecycle.shouldResume(waiting: true, minimized: true))
+        XCTAssertTrue(MirrorLifecycle.shouldResume(waiting: true, minimized: false))
+        XCTAssertFalse(MirrorLifecycle.shouldResume(waiting: false, minimized: false))
+    }
+
     func testCaptureAcceptsPixelRoundingWithoutAcceptingOldSize() {
         let source = CGSize(width: 800.5, height: 500.5)
         XCTAssertTrue(MirrorGeometry.coherentCapture(pixels: CGSize(width: 1600, height: 1000), content: source, source: source, scale: 2))

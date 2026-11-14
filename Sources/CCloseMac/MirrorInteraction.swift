@@ -82,10 +82,26 @@ enum MirrorGeometry {
 /// PID-only posting is not enough for a background app with multiple windows.
 /// The undocumented window-routing fields (51, 58) follow the technique described in
 /// https://github.com/PerpetualBeta/WindowPin/blob/main/Sources/EventForwarder.swift
-/// They are isolated here; no global/HID posting fallback is used.
+/// Addressed events are retained only when native hit-testing is unavailable.
 enum MirrorEventRouter {
     private static let sessionSource = CGEventSource(stateID: .combinedSessionState)
     static let marker: Int64 = 0x4343_4C53
+
+    // Called only after the overlay is transparent to input and the source is verified
+    // underneath it. Clear process/window routing inherited from the overlay event.
+    static func nativeCopy(_ event: CGEvent) -> CGEvent? {
+        guard let copy = event.copy() else { return nil }
+        copy.setIntegerValueField(.eventSourceUserData, value: marker)
+        for field in [CGEventField.eventTargetUnixProcessID, .mouseEventWindowUnderMousePointer,
+                      .mouseEventWindowUnderMousePointerThatCanHandleThisEvent] {
+            copy.setIntegerValueField(field, value: 0)
+        }
+        for raw: UInt32 in [51, 58] {
+            if let field = CGEventField(rawValue: raw) { copy.setIntegerValueField(field, value: 0) }
+        }
+        return copy
+    }
+    static func postNative(_ event: CGEvent) { nativeCopy(event)?.post(tap: .cghidEventTap) }
 
     static func addressedCopy(_ original: CGEvent, point: CGPoint, windowID: UInt32, pid: pid_t,
                               delta: CGPoint? = nil) -> CGEvent? {

@@ -1,13 +1,12 @@
-## v1.0.1
+## v1.0.2
 
-- 普通模式提前将鼠标输入交给重合的原窗口，减少点击、滚轮依赖定向合成事件失效的问题；独立桌面保持只读预览。
-- 双击标题栏空白处直接填充可用屏幕，再次双击还原；移除 0.3 秒合成事件等待。
-- 标题栏上沿也可长按取消、双击；移动超过容差时才切为拖动/缩放。
-- 合并并短期缓存标题栏命中查询，减少光标移动时的辅助功能调用；权限通过后停止重复能力探测。
-- 界面显示 v1.0.1，不再附加括号构建号。
+- 普通模式：操作时显示重合的原窗口，首个补发事件清除镜像路由，减少点击、滚动无反馈；独立桌面仍只读。
+- 短暂辅助功能超时不再判定窗口关闭；捕获失败保留置顶并有限重试。
+- 普通与独立模式最小化都保留置顶会话，恢复原窗口后继续；不再直接清理独立桌面。
+- 保留双击标题栏填充/还原、长按取消；显示 v1.0.2，无括号后缀。
 
-macOS 14+，Apple Silicon；24 项自动测试通过，本机 26.6.2 完成普通模式点击输入、双击放大和还原回归。macOS 27.2 及不同应用仍需实机复测。
+macOS 14+，Apple Silicon。27 项自动测试通过；本机 macOS 26.6.2 验证不替代 MacBook Pro macOS 27.2 实测。
 
-退出旧版，下载 ZIP 并替换应用。若权限未生效，请核对辅助功能、输入监控、屏幕录制后重新打开。ad-hoc 签名，未通过 Apple 公证；确认来源后可在“隐私与安全性”选择“仍要打开”。无需修改 SIP。
+退出旧版后替换应用，确认面板显示 v1.0.2。授权辅助功能、输入监控、屏幕录制。ad-hoc 签名、未公证；确认来源后可在“隐私与安全性”选择“仍要打开”。无需修改 SIP。
 
-[完整说明与边界](https://github.com/flyhu2/CClose-MacOS#readme)。鸣谢 [cclose / Chaohe Shi](https://github.com/chaohershi/cclose)、WindowPin、MoveItHere、Hammerspoon。
+[使用说明与边界](https://github.com/flyhu2/CClose-MacOS#readme)。鸣谢 [cclose / Chaohe Shi](https://github.com/chaohershi/cclose)、WindowPin、MoveItHere、Hammerspoon。
